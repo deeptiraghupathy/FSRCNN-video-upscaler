@@ -6,8 +6,5 @@ node_modules/
 # Production build output
 build/
 
-# Environment variables
-.env
-
 # macOS system file
 .DS_Store
