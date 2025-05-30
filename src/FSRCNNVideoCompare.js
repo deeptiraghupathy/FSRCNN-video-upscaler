@@ -153,8 +153,6 @@ const FSRCNNVideoCompareSync = () => {
     const session = sessionRef.current;
     const fps = syncFps;
     const duration = video.duration;
-    const w = video.videoWidth;
-    const h = video.videoHeight;
     const totalFrames = Math.floor(duration * fps);
     const frameInterval = 1 / fps;
 
