@@ -4,13 +4,10 @@ import * as ort from "onnxruntime-web";
 const FSRCNNVideo = () => {
   const [processing, setProcessing] = useState(false);
   const [originalUrl, setOriginalUrl] = useState(null);
-  const [frames, setFrames] = useState([]);
   const [upscaledFrames, setUpscaledFrames] = useState([]);
   const [currentFrame, setCurrentFrame] = useState(0);
-  const [scaleFactor, setScaleFactor] = useState(2);
 
   const videoRef = useRef();
-  const canvasRef = useRef();
 
   const handleVideoUpload = (e) => {
     const file = e.target.files[0];
@@ -184,8 +181,8 @@ const FSRCNNVideo = () => {
           <img
             src={upscaledFrames[currentFrame]}
             alt="upscaled-frame"
-            width={320 * scaleFactor}
-            height={180 * scaleFactor}
+            width={320 * 2}
+            height={180 * 2}
             style={{ border: "1px solid #ccc", background: "#222" }}
           />
           <p>
