@@ -14,7 +14,6 @@ const FSRCNNVideo = () => {
     if (file) {
       const url = URL.createObjectURL(file);
       setOriginalUrl(url);
-      setFrames([]);
       setUpscaledFrames([]);
     }
   };
