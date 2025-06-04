@@ -3,33 +3,68 @@ import * as ort from "onnxruntime-web";
 
 const FSRCNNVideoCompareSync = () => {
   const [originalUrl, setOriginalUrl] = useState(null);
-  const [scaleFactor, setScaleFactor] = useState(2);
   const [frameMeta, setFrameMeta] = useState({ w: 0, h: 0, duration: 0 });
   const [videoReady, setVideoReady] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [playingSync, setPlayingSync] = useState(false);
-  const [syncFps, setSyncFps] = useState(10);
+  const [syncFps, setSyncFps] = useState(24);
   const [frameIdx, setFrameIdx] = useState(0);
 
+  const scaleFactor = 2;
+
   const [classicFrameUrl, setClassicFrameUrl] = useState(null);
-  const [originalFrameUrl, setOriginalFrameUrl] = useState(null);
   const [neuralFrameUrl, setNeuralFrameUrl] = useState(null);
 
-  const [leftMode, setLeftMode] = useState("classic"); // "classic" or "original"
+  const [neuralFrameCount, setNeuralFrameCount] = useState(0);
+  const [bicubicFrameCount, setBicubicFrameCount] = useState(0);
 
+  const [avgOnnx, setAvgOnnx] = useState(0);
+  const [avgPixel, setAvgPixel] = useState(0);
+  const [avgPost, setAvgPost] = useState(0);
+  const [avgTotal, setAvgTotal] = useState(0);
+
+  const [fpsOriginal, setFpsOriginal] = useState(0);
+  const [fpsNeural, setFpsNeural] = useState(0);
+
+  const [isPaused, setIsPaused] = useState(false);
+
+  // Refs
   const videoRef = useRef();
+  const audioVideoRef = useRef(); // New: for audio playback and driving timeline
   const sessionRef = useRef();
   const playFlag = useRef(false);
+  const pauseFlag = useRef(false);
 
-  // Load ONNX model once
+  const originalFramesThisSec = useRef(0);
+  const neuralFramesThisSec = useRef(0);
+  const lastFpsUpdate = useRef(performance.now());
+
+  const avgWindow = 30;
+  const avgBufOnnx = useRef([]);
+  const avgBufPixel = useRef([]);
+  const avgBufPost = useRef([]);
+  const avgBufTotal = useRef([]);
+
+  // ONNX backend init
   React.useEffect(() => {
-    ort.env.wasm.numThreads = 1;
+    if (navigator.gpu) {
+      console.log("WebGPU is available!");
+    }
+    try {
+      ort.env.webgpu = ort.env.webgpu || {};
+      ort.env.webgpu.enabled = true;
+      ort.env.wasm.proxy = false;
+      console.log("Attempting ONNX WebGPU backend...");
+    } catch (e) {
+      console.log("Could not enable ONNX WebGPU, falling back to WASM");
+    }
+    ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
     ort.env.wasm.simd = true;
-    ort.env.wasm.proxy = true;
-    ort.InferenceSession.create("/models/fsrcnn_x4.onnx")
+
+    ort.InferenceSession.create("/models/fsrcnn_x2.onnx", { executionProviders: ["webgpu", "wasm"] })
       .then((session) => {
         sessionRef.current = session;
-        console.log("ONNX model loaded");
+        console.log("ONNX model loaded (x2)");
       })
       .catch((err) => {
         console.error("Failed to load ONNX model:", err);
@@ -37,7 +72,7 @@ const FSRCNNVideoCompareSync = () => {
       });
   }, []);
 
-  // Frame extraction & processing helpers
+  // ----- YUV/RGB conversion -----
   function rgbToYuv(r, g, b) {
     const y = 0.299 * r + 0.587 * g + 0.114 * b;
     const u = -0.168736 * r - 0.331264 * g + 0.5 * b + 128;
@@ -73,12 +108,12 @@ const FSRCNNVideoCompareSync = () => {
     return { tensorY, uPlane: uArr, vPlane: vArr, width, height };
   };
 
-  // Classic upscale with canvas
-  const classicUpscaleCanvas = (imgData, scale) => {
+  // ----- Classic Bicubic Upscale -----
+  const classicUpscaleCanvas = (imgData) => {
     const srcW = imgData.width;
     const srcH = imgData.height;
-    const dstW = srcW * scale;
-    const dstH = srcH * scale;
+    const dstW = srcW * scaleFactor;
+    const dstH = srcH * scaleFactor;
     const srcCanvas = document.createElement("canvas");
     srcCanvas.width = srcW;
     srcCanvas.height = srcH;
@@ -89,21 +124,12 @@ const FSRCNNVideoCompareSync = () => {
     dstCanvas.height = dstH;
     const dstCtx = dstCanvas.getContext("2d");
     dstCtx.imageSmoothingEnabled = true;
+    dstCtx.imageSmoothingQuality = "high";
     dstCtx.drawImage(srcCanvas, 0, 0, dstW, dstH);
     return dstCanvas.toDataURL();
   };
 
-  // For "original" mode, just turn frame into PNG data URL
-  const getImageDataUrl = (imgData) => {
-    const srcW = imgData.width;
-    const srcH = imgData.height;
-    const srcCanvas = document.createElement("canvas");
-    srcCanvas.width = srcW;
-    srcCanvas.height = srcH;
-    srcCanvas.getContext("2d").putImageData(imgData, 0, 0);
-    return srcCanvas.toDataURL();
-  };
-
+  // Nearest-neighbor upscale for U/V
   const upscaleChannelToSize = (channelData, srcW, srcH, dstW, dstH) => {
     const upArr = new Float32Array(dstW * dstH);
     for (let y = 0; y < dstH; y++) {
@@ -116,54 +142,175 @@ const FSRCNNVideoCompareSync = () => {
     return upArr;
   };
 
+  function fastYuvToRgb(y, u, v) {
+    u = u - 128;
+    v = v - 128;
+    let r = y + 1.402 * v;
+    let g = y - 0.344136 * u - 0.714136 * v;
+    let b = y + 1.772 * u;
+    return [r, g, b];
+  }
+
   const yuvMerge = (upY, upU, upV, width, height) => {
+    const pixelCount = width * height;
+    const buf = new Uint8ClampedArray(pixelCount * 4);
+    for (let i = 0; i < pixelCount; ++i) {
+      const y = upY[i] * 255.0;
+      const u = upU[i];
+      const v = upV[i];
+      const [r, g, b] = fastYuvToRgb(y, u, v);
+      buf[i * 4 + 0] = r < 0 ? 0 : r > 255 ? 255 : r;
+      buf[i * 4 + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
+      buf[i * 4 + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
+      buf[i * 4 + 3] = 255;
+    }
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d");
-    const imageData = ctx.createImageData(width, height);
-    for (let i = 0; i < width * height; i++) {
-      const y = upY[i] * 255.0;
-      const u = Math.max(0, Math.min(255, upU[i]));
-      const v = Math.max(0, Math.min(255, upV[i]));
-      const [r, g, b] = yuvToRgb(y, u, v);
-      imageData.data[i * 4 + 0] = r;
-      imageData.data[i * 4 + 1] = g;
-      imageData.data[i * 4 + 2] = b;
-      imageData.data[i * 4 + 3] = 255;
-    }
+    const imageData = new ImageData(buf, width, height);
     ctx.putImageData(imageData, 0, 0);
     return canvas.toDataURL();
   };
 
+  // ---- Synchronized Playback Logic ----
   const playSynchronized = async () => {
-    if (!videoRef.current || !sessionRef.current || !videoReady) {
+    if (!videoRef.current || !audioVideoRef.current || !sessionRef.current || !videoReady) {
       alert("Video not ready or ONNX not loaded!");
       return;
     }
     setClassicFrameUrl(null);
-    setOriginalFrameUrl(null);
     setNeuralFrameUrl(null);
     setFrameIdx(0);
+    setNeuralFrameCount(0);
+    setBicubicFrameCount(0);
     setProcessing(true);
     setPlayingSync(true);
+    setIsPaused(false);
+
+    setAvgOnnx(0); setAvgPixel(0); setAvgPost(0); setAvgTotal(0);
+    avgBufOnnx.current = [];
+    avgBufPixel.current = [];
+    avgBufPost.current = [];
+    avgBufTotal.current = [];
+
+    setFpsOriginal(0);
+    setFpsNeural(0);
+    originalFramesThisSec.current = 0;
+    neuralFramesThisSec.current = 0;
+    lastFpsUpdate.current = performance.now();
+
     playFlag.current = true;
+    pauseFlag.current = false;
 
-    const video = videoRef.current;
+    ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
+    ort.env.wasm.simd = true;
+
+    const video = videoRef.current;       // For frame extraction (muted, hidden)
+    const audioVideo = audioVideoRef.current; // For audio playback and time master
     const session = sessionRef.current;
-    const fps = syncFps;
-    const duration = video.duration;
+    const fps = Math.max(12, Math.min(syncFps, 100));
+    const duration = audioVideo.duration;
     const totalFrames = Math.floor(duration * fps);
-    const frameInterval = 1 / fps;
 
-    for (let i = 0; i < totalFrames && playFlag.current; i++) {
-      setFrameIdx(i + 1);
+    // Reset video states
+    video.pause();
+    audioVideo.currentTime = 0;
+    video.currentTime = 0;
 
-      video.currentTime = i * frameInterval;
-      await new Promise((resolve) => (video.onseeked = resolve));
+    // Start audio playback
+    audioVideo.volume = 1.0;
+    audioVideo.muted = false;
+    audioVideo.play();
+
+    function updateFpsMetrics() {
+      const now = performance.now();
+      const dt = (now - lastFpsUpdate.current) / 1000;
+      if (dt >= 1) {
+        setFpsOriginal(Math.round(originalFramesThisSec.current / dt));
+        setFpsNeural(Math.round(neuralFramesThisSec.current / dt));
+        originalFramesThisSec.current = 0;
+        neuralFramesThisSec.current = 0;
+        lastFpsUpdate.current = now;
+      }
+    }
+
+    async function processNeuralFrame(imgData, ctxW, ctxH) {
+      const t0 = performance.now();
+      const { tensorY, uPlane, vPlane } = extractYUV(imgData);
+      const t1 = performance.now();
+
+      const t2 = performance.now();
+      const outputs = await session.run({ input: tensorY });
+      const t3 = performance.now();
+
+      const outputTensor = outputs.output || Object.values(outputs)[0];
+      const outW = outputTensor.dims[3];
+      const outH = outputTensor.dims[2];
+      const upY = outputTensor.data;
+      const upU = upscaleChannelToSize(uPlane, ctxW, ctxH, outW, outH);
+      const upV = upscaleChannelToSize(vPlane, ctxW, ctxH, outW, outH);
+      const t4 = performance.now();
+      const dataUrl = yuvMerge(upY, upU, upV, outW, outH);
+      const t5 = performance.now();
+
+      avgBufPixel.current.push(t1 - t0);
+      avgBufOnnx.current.push(t3 - t2);
+      avgBufPost.current.push((t4 - t3) + (t5 - t4));
+      avgBufTotal.current.push(t5 - t0);
+      if (avgBufOnnx.current.length > avgWindow) {
+        avgBufPixel.current.shift(); avgBufOnnx.current.shift(); avgBufPost.current.shift(); avgBufTotal.current.shift();
+      }
+      setAvgPixel(avgBufPixel.current.reduce((a, b) => a + b, 0) / avgBufPixel.current.length);
+      setAvgOnnx(avgBufOnnx.current.reduce((a, b) => a + b, 0) / avgBufOnnx.current.length);
+      setAvgPost(avgBufPost.current.reduce((a, b) => a + b, 0) / avgBufPost.current.length);
+      setAvgTotal(avgBufTotal.current.reduce((a, b) => a + b, 0) / avgBufTotal.current.length);
+
+      return dataUrl;
+    }
+
+    let lastFrameIdx = -1;
+    let rafId;
+
+    const displayLoop = async () => {
+      if (!playFlag.current) {
+        setPlayingSync(false);
+        setProcessing(false);
+        audioVideo.pause();
+        return;
+      }
+      if (pauseFlag.current) {
+        setProcessing(false);
+        audioVideo.pause();
+        return;
+      }
 
       const ctxW = video.videoWidth;
       const ctxH = video.videoHeight;
+
+      // Get master time from audio video
+      const currentTime = audioVideo.currentTime;
+      const currFrameIdx = Math.floor(currentTime * fps);
+
+      if (currFrameIdx >= totalFrames || currentTime >= duration) {
+        setPlayingSync(false);
+        setProcessing(false);
+        audioVideo.pause();
+        return;
+      }
+
+      // Prevent duplicate frame work
+      if (currFrameIdx === lastFrameIdx) {
+        rafId = requestAnimationFrame(displayLoop);
+        return;
+      }
+      lastFrameIdx = currFrameIdx;
+      setFrameIdx(currFrameIdx + 1);
+
+      // Seek frame extraction video to same time
+      // (we want exact frame, so pause and seek; do not play this video)
+      video.currentTime = currentTime;
+      await new Promise((resolve) => (video.onseeked = resolve));
       const canvas = document.createElement("canvas");
       canvas.width = ctxW;
       canvas.height = ctxH;
@@ -171,35 +318,59 @@ const FSRCNNVideoCompareSync = () => {
       ctx.drawImage(video, 0, 0, ctxW, ctxH);
       const imgData = ctx.getImageData(0, 0, ctxW, ctxH);
 
-      if (leftMode === "classic") {
-        setClassicFrameUrl(classicUpscaleCanvas(imgData, scaleFactor));
-        setOriginalFrameUrl(null);
+      // Classic/bicubic
+      const classicUrl = classicUpscaleCanvas(imgData);
+      setClassicFrameUrl(classicUrl);
+      originalFramesThisSec.current += 1;
+
+      // Neural upscale (timeout after 250ms)
+      let neuralUrl = null;
+      try {
+        neuralUrl = await Promise.race([
+          processNeuralFrame(imgData, ctxW, ctxH),
+          new Promise((_, reject) => setTimeout(() => reject("timeout"), 250)),
+        ]);
+      } catch (err) {
+        neuralUrl = null;
+      }
+      if (neuralUrl) {
+        setNeuralFrameUrl(neuralUrl);
+        setNeuralFrameCount((c) => c + 1);
+        neuralFramesThisSec.current += 1;
       } else {
-        setOriginalFrameUrl(getImageDataUrl(imgData));
-        setClassicFrameUrl(null);
+        setNeuralFrameUrl(classicUrl);
+        setBicubicFrameCount((c) => c + 1);
       }
 
-      // --- Neural upscale ---
-      try {
-        const { tensorY, uPlane, vPlane, width, height } = extractYUV(imgData);
-        const outputs = await session.run({ input: tensorY });
-        const outputTensor = outputs.output || Object.values(outputs)[0];
-        const outW = outputTensor.dims[3];
-        const outH = outputTensor.dims[2];
-        const upY = outputTensor.data;
-        const upU = upscaleChannelToSize(uPlane, width, height, outW, outH);
-        const upV = upscaleChannelToSize(vPlane, width, height, outW, outH);
-        setNeuralFrameUrl(yuvMerge(upY, upU, upV, outW, outH));
-      } catch (err) {
-        console.error("ONNX inference error:", err);
-        alert("Neural upscaling failed: " + err);
-        setPlayingSync(false);
-        setProcessing(false);
-        return;
-      }
+      updateFpsMetrics();
+      rafId = requestAnimationFrame(displayLoop);
+    };
+
+    displayLoop();
+
+    // Clean up on unmount/stop
+    return () => {
+      playFlag.current = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      audioVideo.pause();
+    };
+  };
+
+  // Pause/resume logic
+  const handlePauseResume = () => {
+    if (!playingSync) return;
+    if (isPaused) {
+      pauseFlag.current = false;
+      setIsPaused(false);
+      setProcessing(true);
+      audioVideoRef.current.play();
+      playSynchronized();
+    } else {
+      pauseFlag.current = true;
+      setIsPaused(true);
+      setProcessing(false);
+      audioVideoRef.current.pause();
     }
-    setPlayingSync(false);
-    setProcessing(false);
   };
 
   // ----------- UI and Handlers -------------
@@ -219,10 +390,25 @@ const FSRCNNVideoCompareSync = () => {
   const handleVideoUpload = (e) => {
     setVideoReady(false);
     setClassicFrameUrl(null);
-    setOriginalFrameUrl(null);
     setNeuralFrameUrl(null);
     setFrameIdx(0);
+    setNeuralFrameCount(0);
+    setBicubicFrameCount(0);
+    setProcessing(false);
+    setPlayingSync(false);
+    setIsPaused(false);
+    setFpsOriginal(0);
+    setFpsNeural(0);
+    setAvgOnnx(0);
+    setAvgPixel(0);
+    setAvgPost(0);
+    setAvgTotal(0);
     playFlag.current = false;
+    pauseFlag.current = false;
+    avgBufOnnx.current = [];
+    avgBufPixel.current = [];
+    avgBufPost.current = [];
+    avgBufTotal.current = [];
     const file = e.target.files[0];
     if (file) {
       const url = URL.createObjectURL(file);
@@ -234,27 +420,18 @@ const FSRCNNVideoCompareSync = () => {
 
   return (
     <div>
-      <h1>FSRCNN Synchronized Video Frame Comparison</h1>
+      <h1>FSRCNN Synchronized Video Frame Comparison (2x) + Audio Sync</h1>
       <input type="file" accept="video/*" onChange={handleVideoUpload} />
       <div style={{ margin: 12 }}>
         <label>
-          Scale Factor:{" "}
-          <select
-            value={scaleFactor}
-            onChange={(e) => setScaleFactor(Number(e.target.value))}
-            disabled={processing || playingSync}
-          >
-            <option value="2">2x</option>
-            <option value="3">3x</option>
-            <option value="4">4x</option>
-          </select>
+          Scale Factor: <b>2x</b>
         </label>
         &nbsp; FPS:{" "}
         <input
           type="number"
           value={syncFps}
-          min={1}
-          max={30}
+          min={12}
+          max={100}
           onChange={(e) => setSyncFps(Number(e.target.value))}
           disabled={processing || playingSync}
           style={{ width: 50 }}
@@ -266,50 +443,52 @@ const FSRCNNVideoCompareSync = () => {
         >
           {playingSync ? "Playing..." : "Play Synchronized"}
         </button>
+        &nbsp;
+        <button
+          onClick={handlePauseResume}
+          disabled={!playingSync}
+          style={{
+            marginLeft: 12,
+            background: isPaused ? "#8c0" : "#005",
+            color: "#fff",
+            fontWeight: "bold",
+            borderRadius: 4,
+            padding: "0 12px",
+            cursor: "pointer",
+            opacity: playingSync ? 1 : 0.6,
+          }}
+        >
+          {isPaused ? "Resume" : "Pause"}
+        </button>
         <span style={{ marginLeft: 16 }}>
           {frameIdx > 0 &&
             frameMeta.duration &&
             `Frame ${frameIdx} / ${Math.floor(frameMeta.duration * syncFps)}`}
         </span>
-        <div style={{ marginLeft: 24, display: "inline-block" }}>
-          <label>
-            <input
-              type="radio"
-              name="leftmode"
-              checked={leftMode === "classic"}
-              disabled={processing || playingSync}
-              onChange={() => setLeftMode("classic")}
-              style={{ marginRight: 4 }}
-            />
-            Classic Upscale
-          </label>
-          &nbsp;&nbsp;
-          <label>
-            <input
-              type="radio"
-              name="leftmode"
-              checked={leftMode === "original"}
-              disabled={processing || playingSync}
-              onChange={() => setLeftMode("original")}
-              style={{ marginRight: 4 }}
-            />
-            Original (native size)
-          </label>
-        </div>
       </div>
 
+      {/* This video is hidden, used for frame extraction (always muted/paused) */}
       <video
         ref={videoRef}
         src={originalUrl}
         style={{ display: "none" }}
+        muted
         onLoadedMetadata={onLoadedMetadata}
       />
 
-      <div style={{ display: "flex", gap: 24, alignItems: "flex-start", marginTop: 16 }}>
-        {/* Left: Classic Upscale or Original */}
-        {leftMode === "classic" && classicFrameUrl && (
-          <div>
-            <h3>Classic Upscale</h3>
+      {/* This video plays the audio and drives the timeline */}
+      <video
+        ref={audioVideoRef}
+        src={originalUrl}
+        style={{ display: "none" }}
+        controls={false}
+        preload="auto"
+      />
+
+      <div style={{ display: "flex", gap: 32, alignItems: "flex-start", marginTop: 16 }}>
+        <div>
+          <h3>Bicubic Upscale (2x)</h3>
+          {classicFrameUrl && (
             <img
               src={classicFrameUrl}
               alt="classic"
@@ -321,28 +500,11 @@ const FSRCNNVideoCompareSync = () => {
                 objectFit: "contain",
               }}
             />
-          </div>
-        )}
-        {leftMode === "original" && originalFrameUrl && (
-          <div>
-            <h3>Original (native)</h3>
-            <img
-              src={originalFrameUrl}
-              alt="original"
-              width={frameMeta.w}
-              height={frameMeta.h}
-              style={{
-                border: "2px solid #999",
-                background: "#222",
-                objectFit: "contain",
-              }}
-            />
-          </div>
-        )}
-        {/* Neural (right) */}
-        {neuralFrameUrl && (
-          <div>
-            <h3>Neural Upscale (FSRCNN)</h3>
+          )}
+        </div>
+        <div>
+          <h3>Neural Upscale (FSRCNN x2)</h3>
+          {neuralFrameUrl && (
             <img
               src={neuralFrameUrl}
               alt="neural"
@@ -354,10 +516,46 @@ const FSRCNNVideoCompareSync = () => {
                 objectFit: "contain",
               }}
             />
-          </div>
-        )}
+          )}
+        </div>
       </div>
       {processing && <div>Processing frame {frameIdx}...</div>}
+      {/* METRICS */}
+      <div
+        style={{
+          marginTop: 24,
+          padding: 12,
+          border: "1px solid #ccc",
+          borderRadius: 8,
+          background: "#f8f8f8",
+          width: 390,
+        }}
+      >
+        <b>Frame Metrics</b>
+        <br />
+        Neural upscaled: <span style={{ color: "#28a745", fontWeight: "bold" }}>{neuralFrameCount}</span>
+        <br />
+        Bicubic fallback: <span style={{ color: "#d9534f", fontWeight: "bold" }}>{bicubicFrameCount}</span>
+        <br /><br />
+        <b>Playback FPS</b>
+        <br />
+        Original (left): <span style={{ color: "#007bff", fontWeight: "bold" }}>{fpsOriginal}</span> fps
+        <br />
+        Neural (right): <span style={{ color: "#f39c12", fontWeight: "bold" }}>{fpsNeural}</span> fps
+        <br /><br />
+        <b>Performance Metrics (ms, avg last {avgWindow})</b>
+        <br />
+        ONNX inference: <b>{avgOnnx.toFixed(1)}</b>
+        <br />
+        Pixel extraction: <b>{avgPixel.toFixed(1)}</b>
+        <br />
+        Postprocess: <b>{avgPost.toFixed(1)}</b>
+        <br />
+        <span>Total/frame: <b>{avgTotal.toFixed(1)}</b></span>
+      </div>
+      <div style={{fontSize:12, color:'#777', marginTop:10}}>
+        Backend: <b>{ort.env.webgpu && ort.env.webgpu.enabled ? 'WebGPU or WASM' : 'WASM'}</b> (Check your browser console for logs)
+      </div>
     </div>
   );
 };
