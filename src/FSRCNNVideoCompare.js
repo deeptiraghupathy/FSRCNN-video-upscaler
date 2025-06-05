@@ -12,9 +12,6 @@ const FSRCNNVideoCompareSync = () => {
 
   const scaleFactor = 2;
 
-  const [classicFrameUrl, setClassicFrameUrl] = useState(null);
-  const [neuralFrameUrl, setNeuralFrameUrl] = useState(null);
-
   const [neuralFrameCount, setNeuralFrameCount] = useState(0);
   const [bicubicFrameCount, setBicubicFrameCount] = useState(0);
 
@@ -27,13 +24,17 @@ const FSRCNNVideoCompareSync = () => {
   const [fpsNeural, setFpsNeural] = useState(0);
 
   const [isPaused, setIsPaused] = useState(false);
+  const [onnxBackend, setOnnxBackend] = useState("unknown");
 
   // Refs
   const videoRef = useRef();
-  const audioVideoRef = useRef(); // New: for audio playback and driving timeline
+  const audioVideoRef = useRef();
   const sessionRef = useRef();
   const playFlag = useRef(false);
   const pauseFlag = useRef(false);
+
+  const classicCanvasRef = useRef();
+  const neuralCanvasRef = useRef();
 
   const originalFramesThisSec = useRef(0);
   const neuralFramesThisSec = useRef(0);
@@ -45,7 +46,7 @@ const FSRCNNVideoCompareSync = () => {
   const avgBufPost = useRef([]);
   const avgBufTotal = useRef([]);
 
-  // ONNX backend init
+  // --- ONNX backend init and detection
   React.useEffect(() => {
     if (navigator.gpu) {
       console.log("WebGPU is available!");
@@ -64,7 +65,17 @@ const FSRCNNVideoCompareSync = () => {
     ort.InferenceSession.create("/models/fsrcnn_x2.onnx", { executionProviders: ["webgpu", "wasm"] })
       .then((session) => {
         sessionRef.current = session;
-        console.log("ONNX model loaded (x2)");
+        // Detect backend
+        let backendName = "unknown";
+        if (session.sessionOptions?.executionProviders && session.sessionOptions.executionProviders.length > 0) {
+          backendName = session.sessionOptions.executionProviders[0];
+        } else if (ort.env.webgpu.enabled && navigator.gpu) {
+          backendName = "webgpu";
+        } else {
+          backendName = "wasm";
+        }
+        setOnnxBackend(backendName);
+        console.log(`ONNX model loaded (x2), backend: ${backendName}`);
       })
       .catch((err) => {
         console.error("Failed to load ONNX model:", err);
@@ -79,15 +90,12 @@ const FSRCNNVideoCompareSync = () => {
     const v = 0.5 * r - 0.418688 * g - 0.081312 * b + 128;
     return [y, u, v];
   }
-  function yuvToRgb(y, u, v) {
+  function fastYuvToRgb(y, u, v) {
     u = u - 128;
     v = v - 128;
     let r = y + 1.402 * v;
     let g = y - 0.344136 * u - 0.714136 * v;
     let b = y + 1.772 * u;
-    r = Math.round(Math.min(255, Math.max(0, r)));
-    g = Math.round(Math.min(255, Math.max(0, g)));
-    b = Math.round(Math.min(255, Math.max(0, b)));
     return [r, g, b];
   }
   const extractYUV = (imageData) => {
@@ -109,24 +117,24 @@ const FSRCNNVideoCompareSync = () => {
   };
 
   // ----- Classic Bicubic Upscale -----
-  const classicUpscaleCanvas = (imgData) => {
+  const classicUpscaleCanvas = (imgData, targetCanvas) => {
     const srcW = imgData.width;
     const srcH = imgData.height;
     const dstW = srcW * scaleFactor;
     const dstH = srcH * scaleFactor;
+    // Draw src
     const srcCanvas = document.createElement("canvas");
     srcCanvas.width = srcW;
     srcCanvas.height = srcH;
     srcCanvas.getContext("2d").putImageData(imgData, 0, 0);
-
-    const dstCanvas = document.createElement("canvas");
-    dstCanvas.width = dstW;
-    dstCanvas.height = dstH;
-    const dstCtx = dstCanvas.getContext("2d");
-    dstCtx.imageSmoothingEnabled = true;
-    dstCtx.imageSmoothingQuality = "high";
-    dstCtx.drawImage(srcCanvas, 0, 0, dstW, dstH);
-    return dstCanvas.toDataURL();
+    // Upscale
+    const ctx = targetCanvas.getContext("2d");
+    targetCanvas.width = dstW;
+    targetCanvas.height = dstH;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.clearRect(0, 0, dstW, dstH);
+    ctx.drawImage(srcCanvas, 0, 0, dstW, dstH);
   };
 
   // Nearest-neighbor upscale for U/V
@@ -142,16 +150,8 @@ const FSRCNNVideoCompareSync = () => {
     return upArr;
   };
 
-  function fastYuvToRgb(y, u, v) {
-    u = u - 128;
-    v = v - 128;
-    let r = y + 1.402 * v;
-    let g = y - 0.344136 * u - 0.714136 * v;
-    let b = y + 1.772 * u;
-    return [r, g, b];
-  }
-
-  const yuvMerge = (upY, upU, upV, width, height) => {
+  // Write merged YUV directly to canvas
+  const yuvMergeToCanvas = (upY, upU, upV, width, height, canvas) => {
     const pixelCount = width * height;
     const buf = new Uint8ClampedArray(pixelCount * 4);
     for (let i = 0; i < pixelCount; ++i) {
@@ -164,13 +164,11 @@ const FSRCNNVideoCompareSync = () => {
       buf[i * 4 + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
       buf[i * 4 + 3] = 255;
     }
-    const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d");
     const imageData = new ImageData(buf, width, height);
     ctx.putImageData(imageData, 0, 0);
-    return canvas.toDataURL();
   };
 
   // ---- Synchronized Playback Logic ----
@@ -179,8 +177,6 @@ const FSRCNNVideoCompareSync = () => {
       alert("Video not ready or ONNX not loaded!");
       return;
     }
-    setClassicFrameUrl(null);
-    setNeuralFrameUrl(null);
     setFrameIdx(0);
     setNeuralFrameCount(0);
     setBicubicFrameCount(0);
@@ -235,7 +231,7 @@ const FSRCNNVideoCompareSync = () => {
       }
     }
 
-    async function processNeuralFrame(imgData, ctxW, ctxH) {
+    async function processNeuralFrame(imgData, ctxW, ctxH, targetCanvas) {
       const t0 = performance.now();
       const { tensorY, uPlane, vPlane } = extractYUV(imgData);
       const t1 = performance.now();
@@ -251,7 +247,8 @@ const FSRCNNVideoCompareSync = () => {
       const upU = upscaleChannelToSize(uPlane, ctxW, ctxH, outW, outH);
       const upV = upscaleChannelToSize(vPlane, ctxW, ctxH, outW, outH);
       const t4 = performance.now();
-      const dataUrl = yuvMerge(upY, upU, upV, outW, outH);
+
+      yuvMergeToCanvas(upY, upU, upV, outW, outH, targetCanvas);
       const t5 = performance.now();
 
       avgBufPixel.current.push(t1 - t0);
@@ -266,7 +263,7 @@ const FSRCNNVideoCompareSync = () => {
       setAvgPost(avgBufPost.current.reduce((a, b) => a + b, 0) / avgBufPost.current.length);
       setAvgTotal(avgBufTotal.current.reduce((a, b) => a + b, 0) / avgBufTotal.current.length);
 
-      return dataUrl;
+      return true;
     }
 
     let lastFrameIdx = -1;
@@ -308,37 +305,43 @@ const FSRCNNVideoCompareSync = () => {
       setFrameIdx(currFrameIdx + 1);
 
       // Seek frame extraction video to same time
-      // (we want exact frame, so pause and seek; do not play this video)
       video.currentTime = currentTime;
       await new Promise((resolve) => (video.onseeked = resolve));
-      const canvas = document.createElement("canvas");
-      canvas.width = ctxW;
-      canvas.height = ctxH;
-      const ctx = canvas.getContext("2d");
+      const tmpCanvas = document.createElement("canvas");
+      tmpCanvas.width = ctxW;
+      tmpCanvas.height = ctxH;
+      const ctx = tmpCanvas.getContext("2d");
       ctx.drawImage(video, 0, 0, ctxW, ctxH);
       const imgData = ctx.getImageData(0, 0, ctxW, ctxH);
 
-      // Classic/bicubic
-      const classicUrl = classicUpscaleCanvas(imgData);
-      setClassicFrameUrl(classicUrl);
+      // Classic/bicubic to canvas
+      if (classicCanvasRef.current) {
+        classicUpscaleCanvas(imgData, classicCanvasRef.current);
+      }
       originalFramesThisSec.current += 1;
 
       // Neural upscale (timeout after 250ms)
-      let neuralUrl = null;
-      try {
-        neuralUrl = await Promise.race([
-          processNeuralFrame(imgData, ctxW, ctxH),
-          new Promise((_, reject) => setTimeout(() => reject("timeout"), 250)),
-        ]);
-      } catch (err) {
-        neuralUrl = null;
+      let neuralOk = false;
+      if (neuralCanvasRef.current) {
+        try {
+          neuralOk = await Promise.race([
+            processNeuralFrame(imgData, ctxW, ctxH, neuralCanvasRef.current),
+            new Promise((_, reject) => setTimeout(() => reject("timeout"), 250)),
+          ]);
+        } catch (err) {
+          neuralOk = false;
+        }
       }
-      if (neuralUrl) {
-        setNeuralFrameUrl(neuralUrl);
+      if (neuralOk) {
         setNeuralFrameCount((c) => c + 1);
         neuralFramesThisSec.current += 1;
       } else {
-        setNeuralFrameUrl(classicUrl);
+        // If fail, just copy the classic output as fallback
+        if (neuralCanvasRef.current && classicCanvasRef.current) {
+          const ctxN = neuralCanvasRef.current.getContext("2d");
+          ctxN.clearRect(0, 0, classicCanvasRef.current.width, classicCanvasRef.current.height);
+          ctxN.drawImage(classicCanvasRef.current, 0, 0);
+        }
         setBicubicFrameCount((c) => c + 1);
       }
 
@@ -389,8 +392,6 @@ const FSRCNNVideoCompareSync = () => {
 
   const handleVideoUpload = (e) => {
     setVideoReady(false);
-    setClassicFrameUrl(null);
-    setNeuralFrameUrl(null);
     setFrameIdx(0);
     setNeuralFrameCount(0);
     setBicubicFrameCount(0);
@@ -488,35 +489,33 @@ const FSRCNNVideoCompareSync = () => {
       <div style={{ display: "flex", gap: 32, alignItems: "flex-start", marginTop: 16 }}>
         <div>
           <h3>Bicubic Upscale (2x)</h3>
-          {classicFrameUrl && (
-            <img
-              src={classicFrameUrl}
-              alt="classic"
-              width={frameMeta.w * scaleFactor}
-              height={frameMeta.h * scaleFactor}
-              style={{
-                border: "2px solid #999",
-                background: "#222",
-                objectFit: "contain",
-              }}
-            />
-          )}
+          <canvas
+            ref={classicCanvasRef}
+            width={frameMeta.w * scaleFactor}
+            height={frameMeta.h * scaleFactor}
+            style={{
+              border: "2px solid #999",
+              background: "#222",
+              objectFit: "contain",
+              width: frameMeta.w * scaleFactor,
+              height: frameMeta.h * scaleFactor
+            }}
+          />
         </div>
         <div>
           <h3>Neural Upscale (FSRCNN x2)</h3>
-          {neuralFrameUrl && (
-            <img
-              src={neuralFrameUrl}
-              alt="neural"
-              width={frameMeta.w * scaleFactor}
-              height={frameMeta.h * scaleFactor}
-              style={{
-                border: "2px solid #999",
-                background: "#222",
-                objectFit: "contain",
-              }}
-            />
-          )}
+          <canvas
+            ref={neuralCanvasRef}
+            width={frameMeta.w * scaleFactor}
+            height={frameMeta.h * scaleFactor}
+            style={{
+              border: "2px solid #999",
+              background: "#222",
+              objectFit: "contain",
+              width: frameMeta.w * scaleFactor,
+              height: frameMeta.h * scaleFactor
+            }}
+          />
         </div>
       </div>
       {processing && <div>Processing frame {frameIdx}...</div>}
@@ -554,7 +553,13 @@ const FSRCNNVideoCompareSync = () => {
         <span>Total/frame: <b>{avgTotal.toFixed(1)}</b></span>
       </div>
       <div style={{fontSize:12, color:'#777', marginTop:10}}>
-        Backend: <b>{ort.env.webgpu && ort.env.webgpu.enabled ? 'WebGPU or WASM' : 'WASM'}</b> (Check your browser console for logs)
+        Backend:&nbsp;
+        <b style={{
+          color: onnxBackend === "webgpu" ? "#008a00" : "#444",
+          textTransform: "uppercase"
+        }}>{onnxBackend}</b>
+        &nbsp;
+        (Check your browser console for ONNX logs)
       </div>
     </div>
   );
