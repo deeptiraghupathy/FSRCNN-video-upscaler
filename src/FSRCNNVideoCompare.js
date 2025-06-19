@@ -775,6 +775,45 @@ const handlePauseResume = () => {
     }
   };
 
+  // Hosted video options
+const hostedVideos = [
+  { label: "Youtube 144p", url: "https://archive.org/details/test_videos_for_demo/TestVideo_144p.mp4" }, 
+  { label: "Astro Action 144p", url: "https://archive.org/details/test_videos_for_demo/action_144p.mp4" },
+  { label: "Astro Animation 144p", url: "https://archive.org/details/test_videos_for_demo/animation_144p.mp4" },
+  { label: "Astro Dance 144p", url: "https://archive.org/details/test_videos_for_demo/video_144p.mp4" },
+  { label: "Astro Animation 288p", url: "https://archive.org/details/test_videos_for_demo/animation_288p.mp4" },
+  { label: "Astro Dance 288p", url: "https://archive.org/details/test_videos_for_demo/video_256p.mp4" }
+];
+
+const handleHostedVideoSelect = (e) => {
+  const url = e.target.value;
+  if (!url) return;
+  setVideoReady(false);
+  setFrameIdx(0);
+  setNeuralFrameCount(0);
+  setBicubicFrameCount(0);
+  setProcessing(false);
+  setPlayingSync(false);
+  setIsPaused(false);
+  setFpsOriginal(0);
+  setFpsNeural(0);
+  setAvgOnnx(0);
+  setAvgPixel(0);
+  setAvgPost(0);
+  setAvgTotal(0);
+  playFlag.current = false;
+  pauseFlag.current = false;
+  avgBufOnnx.current = [];
+  avgBufPixel.current = [];
+  avgBufPost.current = [];
+  avgBufTotal.current = [];
+
+  setOriginalUrl(url);
+
+  if (videoRef.current) videoRef.current.src = url;
+  if (audioVideoRef.current) audioVideoRef.current.src = url;
+};
+
   // ----------- Render -------------
 
   return (
@@ -854,6 +893,30 @@ const handlePauseResume = () => {
               style={{display:"none"}} />
             <span style={{ pointerEvents: "none" }}>Upload Video</span>
           </label>
+
+          {/* Hosted Video Select */}
+<select
+  onChange={handleHostedVideoSelect}
+  defaultValue=""
+  disabled={processing || playingSync}
+  style={{
+    background: "#23304c",
+    color: "#a7fffa",
+    borderRadius: 10,
+    border: "1.5px solid #47a6ff",
+    fontWeight: 700,
+    fontSize: 16,
+    padding: "10px 17px",
+    outline: "none",
+    minWidth: 170,
+    marginLeft: 8
+  }}>
+  <option value="" disabled>Select Hosted Video</option>
+  {hostedVideos.map((vid, idx) =>
+    <option key={idx} value={vid.url}>{vid.label}</option>
+  )}
+</select>
+
           <span style={{ fontSize: 15, color: "#a6b8db", fontWeight: 500, margin: "0 6px" }}>
             <span style={{ color: "#fff", fontWeight: 700 }}>2x</span> Upscale
           </span>
