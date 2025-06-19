@@ -777,12 +777,12 @@ const handlePauseResume = () => {
 
   // Hosted video options
 const hostedVideos = [
-  { label: "Youtube 144p", url: "https://archive.org/details/test_videos_for_demo/TestVideo_144p.mp4" }, 
-  { label: "Astro Action 144p", url: "https://archive.org/details/test_videos_for_demo/action_144p.mp4" },
-  { label: "Astro Animation 144p", url: "https://archive.org/details/test_videos_for_demo/animation_144p.mp4" },
-  { label: "Astro Dance 144p", url: "https://archive.org/details/test_videos_for_demo/video_144p.mp4" },
-  { label: "Astro Animation 288p", url: "https://archive.org/details/test_videos_for_demo/animation_288p.mp4" },
-  { label: "Astro Dance 288p", url: "https://archive.org/details/test_videos_for_demo/video_256p.mp4" }
+  { label: "Youtube 144p", url: "https://fsrcnnvideoupscaler.netlify.app/testVideos/TestVideo_144p.mp4" }, 
+  { label: "Astro Action 144p", url: "https://fsrcnnvideoupscaler.netlify.app/testVideos/action_144p.mp4" },
+  { label: "Astro Animation 144p", url: "https://fsrcnnvideoupscaler.netlify.app/testVideos/animation_144p.mp4" },
+  { label: "Astro Dance 144p", url: "https://fsrcnnvideoupscaler.netlify.app/testVideos/video_144p.mp4" },
+  { label: "Astro Animation 288p", url: "https://fsrcnnvideoupscaler.netlify.app/testVideos/animation_288p.mp4" },
+  { label: "Astro Dance 288p", url: "https://fsrcnnvideoupscaler.netlify.app/testVideos/video_256p.mp4" }
 ];
 
 const handleHostedVideoSelect = (e) => {
