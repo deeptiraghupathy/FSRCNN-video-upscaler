@@ -810,9 +810,16 @@ const handleHostedVideoSelect = (e) => {
 
   setOriginalUrl(url);
 
-  if (videoRef.current) videoRef.current.src = url;
-  if (audioVideoRef.current) audioVideoRef.current.src = url;
+  if (videoRef.current) {
+    videoRef.current.src = url;
+    videoRef.current.load();        // <-- ADD THIS
+  }
+  if (audioVideoRef.current) {
+    audioVideoRef.current.src = url;
+    audioVideoRef.current.load();   // <-- ADD THIS
+  }
 };
+
 
   // ----------- Render -------------
 
