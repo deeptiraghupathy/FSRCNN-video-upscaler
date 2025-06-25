@@ -73,7 +73,7 @@ const [psnrNeural, setPsnrNeural] = useState(null);
 const [ssimBicubic, setSsimBicubic] = useState(null);
 const [ssimNeural, setSsimNeural] = useState(null);
 
-  const [compareMode, setCompareMode] = useState("compare"); // "compare", "upscaled", "sidebyside"
+  const [compareMode, setCompareMode] = useState("sidebyside"); // "compare", "upscaled", "sidebyside"
 
 
   const [neuralFrameCount, setNeuralFrameCount] = useState(0);
@@ -1069,7 +1069,7 @@ const handleHostedVideoSelect = (e) => {
           {compareMode === "sidebyside" && (
             <div style={{ display: "flex", gap: 36, alignItems: "flex-start", justifyContent: "center" }}>
               <div>
-                <div style={{ textAlign: "center", color: "#4ef3ef", fontWeight: 800, fontSize: 16, marginBottom: 7 }}>Bicubic (2x)</div>
+                <div style={{ textAlign: "center", color: "#4ef3ef", fontWeight: 800, fontSize: 16, marginBottom: 7 }}>Original (2x)</div>
                 <canvas ref={classicCanvasRef} width={upscaledSize.w} height={upscaledSize.h}
                   style={{
                     width: upscaledSize.w,
