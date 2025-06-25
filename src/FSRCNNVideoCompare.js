@@ -1058,7 +1058,7 @@ const handleHostedVideoSelect = (e) => {
                 position: "absolute", left: 22, top: 16, color: "#fff", background: "#0ec7fbe0",
                 padding: "4px 17px", borderRadius: 9, fontWeight: 800, fontSize: 16, letterSpacing: ".01em",
                 boxShadow: "0 2px 8px #3df0d966"
-              }}>Bicubic</div>
+              }}>Original</div>
               <div style={{
                 position: "absolute", right: 22, top: 16, color: "#fff", background: "#47a6ffdd",
                 padding: "4px 17px", borderRadius: 9, fontWeight: 800, fontSize: 16, letterSpacing: ".01em",
